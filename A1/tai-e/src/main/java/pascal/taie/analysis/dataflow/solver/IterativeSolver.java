@@ -48,24 +48,21 @@ class IterativeSolver<Node, Fact> extends Solver<Node, Fact> {
         while (hasChanged) {
             hasChanged = false;
             var unvisited = new HashSet<>(cfg.getNodes());
-            var queue = new LinkedList<Node>();
             Node exit = cfg.getExit();
-            queue.add(exit);
+            var queue = new LinkedList<>(cfg.getPredsOf(exit));
             while (!queue.isEmpty()) {
-                var front = queue.remove();
-                for (var pred : cfg.getPredsOf(front)) {
-                    if (!unvisited.contains(pred))
-                        continue;
-                    unvisited.remove(pred);
-                    queue.add(pred);
-                    ((SetFact<?>)result.getOutFact(pred)).clear();
-                    for (var succ : cfg.getSuccsOf(pred)) {
-                        analysis.meetInto(result.getInFact(succ), result.getOutFact(pred));
-                    }
-                    hasChanged = hasChanged || analysis.transferNode(
-                            pred, result.getInFact(pred), result.getOutFact(pred)
-                    );
+                var node = queue.poll();
+                if (!unvisited.contains(node))
+                    continue;
+                unvisited.remove(node);
+                queue.addAll(cfg.getPredsOf(node));
+                result.setOutFact(node, analysis.newInitialFact());
+                for (var succ : cfg.getSuccsOf(node)) {
+                    analysis.meetInto(result.getInFact(succ), result.getOutFact(node));
                 }
+                hasChanged = hasChanged || analysis.transferNode(
+                        node, result.getInFact(node), result.getOutFact(node)
+                );
             }
         }
     }
