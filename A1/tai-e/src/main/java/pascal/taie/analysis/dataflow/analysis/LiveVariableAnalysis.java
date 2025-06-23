@@ -48,23 +48,33 @@ public class LiveVariableAnalysis extends
     @Override
     public SetFact<Var> newBoundaryFact(CFG<Stmt> cfg) {
         // TODO - finish me
-        return null;
+        return new SetFact<>();
     }
 
     @Override
     public SetFact<Var> newInitialFact() {
         // TODO - finish me
-        return null;
+        return new SetFact<>();
     }
 
     @Override
     public void meetInto(SetFact<Var> fact, SetFact<Var> target) {
         // TODO - finish me
+        target.union(fact);
     }
 
     @Override
     public boolean transferNode(Stmt stmt, SetFact<Var> in, SetFact<Var> out) {
         // TODO - finish me
-        return false;
+        var old = in.copy();
+        in.set(out);
+        var uses = stmt.getUses();
+        var defs = stmt.getDef();
+        defs.ifPresent(lValue -> {
+            if (lValue instanceof Var)
+                in.remove((Var) lValue);
+        });
+        in.union(new SetFact(uses.stream().filter(rValue -> rValue instanceof Var).toList()));
+        return !old.equals(in);
     }
 }

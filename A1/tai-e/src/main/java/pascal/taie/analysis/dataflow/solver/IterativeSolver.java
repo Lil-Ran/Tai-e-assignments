@@ -24,7 +24,11 @@ package pascal.taie.analysis.dataflow.solver;
 
 import pascal.taie.analysis.dataflow.analysis.DataflowAnalysis;
 import pascal.taie.analysis.dataflow.fact.DataflowResult;
+import pascal.taie.analysis.dataflow.fact.SetFact;
 import pascal.taie.analysis.graph.cfg.CFG;
+
+import java.util.HashSet;
+import java.util.LinkedList;
 
 class IterativeSolver<Node, Fact> extends Solver<Node, Fact> {
 
@@ -40,5 +44,29 @@ class IterativeSolver<Node, Fact> extends Solver<Node, Fact> {
     @Override
     protected void doSolveBackward(CFG<Node> cfg, DataflowResult<Node, Fact> result) {
         // TODO - finish me
+        boolean hasChanged = true;
+        while (hasChanged) {
+            hasChanged = false;
+            var unvisited = new HashSet<>(cfg.getNodes());
+            var queue = new LinkedList<Node>();
+            Node exit = cfg.getExit();
+            queue.add(exit);
+            while (!queue.isEmpty()) {
+                var front = queue.remove();
+                for (var pred : cfg.getPredsOf(front)) {
+                    if (!unvisited.contains(pred))
+                        continue;
+                    unvisited.remove(pred);
+                    queue.add(pred);
+                    ((SetFact<?>)result.getOutFact(pred)).clear();
+                    for (var succ : cfg.getSuccsOf(pred)) {
+                        analysis.meetInto(result.getInFact(succ), result.getOutFact(pred));
+                    }
+                    hasChanged = hasChanged || analysis.transferNode(
+                            pred, result.getInFact(pred), result.getOutFact(pred)
+                    );
+                }
+            }
+        }
     }
 }
