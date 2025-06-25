@@ -45,9 +45,7 @@ import pascal.taie.ir.stmt.If;
 import pascal.taie.ir.stmt.Stmt;
 import pascal.taie.ir.stmt.SwitchStmt;
 
-import java.util.Comparator;
-import java.util.Set;
-import java.util.TreeSet;
+import java.util.*;
 
 public class DeadCodeDetection extends MethodAnalysis {
 
@@ -71,6 +69,92 @@ public class DeadCodeDetection extends MethodAnalysis {
         Set<Stmt> deadCode = new TreeSet<>(Comparator.comparing(Stmt::getIndex));
         // TODO - finish me
         // Your task is to recognize dead code in ir and add it to deadCode
+
+        var visited = new HashSet<Stmt>();
+        var worklist = new LinkedHashSet<Stmt>();
+        worklist.add(cfg.getEntry());
+        while (!worklist.isEmpty()) {
+            var stmt = worklist.stream().findFirst().get();
+            worklist.remove(stmt);
+
+            // Yes we reached this stmt
+            if (visited.contains(stmt))
+                continue;
+            visited.add(stmt);
+
+            // Useless assignment:
+            // is assignment; lVal is Var; lVal not alive; rVal has no side effect
+            // Otherwise: handle at the end of this while loop
+            if (stmt instanceof AssignStmt<?, ?> assign
+                    && assign.getLValue() instanceof Var lVal
+                    && !liveVars.getOutFact(stmt).contains(lVal)
+                    && hasNoSideEffect(assign.getRValue())
+            ) {
+                // It's reachable but useless
+                deadCode.add(stmt);
+                worklist.addAll(cfg.getSuccsOf(stmt));
+                continue;
+            }
+
+            if (stmt instanceof If if_stmt) {
+                var cond_exp = if_stmt.getCondition();
+                var operand1 = cond_exp.getOperand1();
+                var operand2 = cond_exp.getOperand2();
+
+                // Not all constants, every branch can be reached
+                if (!constants.getInFact(stmt).get(operand1).isConstant()
+                        || !constants.getInFact(stmt).get(operand2).isConstant()) {
+                    worklist.addAll(cfg.getSuccsOf(stmt));
+                    continue;
+                }
+
+                int const1 = constants.getInFact(stmt).get(operand1).getConstant();
+                int const2 = constants.getInFact(stmt).get(operand2).getConstant();
+                var op = cond_exp.getOperator();
+                var compare_result = switch (op) {
+                    case EQ -> const1 == const2;
+                    case NE -> const1 != const2;
+                    case LT -> const1 < const2;
+                    case LE -> const1 <= const2;
+                    case GT -> const1 > const2;
+                    case GE -> const1 >= const2;
+                };
+
+                // Only one branch is known to be reached here
+                var edges = cfg.getOutEdgesOf(stmt);
+                var reachable = edges.stream().filter(e ->
+                        e.getKind() == (compare_result ? Edge.Kind.IF_TRUE : Edge.Kind.IF_FALSE)
+                ).findFirst();
+                if (reachable.isPresent()) {
+                    worklist.add(reachable.get().getTarget());
+                    continue;
+                }
+            }
+
+            // If not constant condition: handle at the end of this while loop
+            if (stmt instanceof SwitchStmt switch_stmt
+                    && constants.getInFact(stmt).get(switch_stmt.getVar()).isConstant()) {
+                int constant = constants.getInFact(stmt).get(switch_stmt.getVar()).getConstant();
+                // Only one branch is known to be reached here
+                var edges = cfg.getOutEdgesOf(stmt);
+                var reachable = edges.stream().filter(e ->
+                        e.isSwitchCase() && e.getCaseValue() == constant
+                ).findFirst();
+                if (reachable.isPresent()) {
+                    worklist.add(reachable.get().getTarget());
+                } else {
+                    worklist.add(switch_stmt.getDefaultTarget());
+                }
+                continue;
+            }
+            
+            // Till now no sign that indicates unreachable, so they are reachable
+            worklist.addAll(cfg.getSuccsOf(stmt));
+        }
+
+        deadCode.addAll(cfg.getNodes().stream().filter(
+                stmt -> !visited.contains(stmt) && !cfg.isEntry(stmt) && !cfg.isExit(stmt)
+        ).toList());
         return deadCode;
     }
 
