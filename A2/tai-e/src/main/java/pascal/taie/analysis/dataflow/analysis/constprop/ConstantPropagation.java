@@ -142,6 +142,14 @@ public class ConstantPropagation extends
         }
         Value operand1 = in.get(((BinaryExp) exp).getOperand1());
         Value operand2 = in.get(((BinaryExp) exp).getOperand2());
+        // NAC / 0 => UNDEF
+        if (operand2.isConstant()
+                && operand2.getConstant() == 0
+                && exp instanceof ArithmeticExp exp1
+                && (exp1.getOperator() == ArithmeticExp.Op.DIV
+                || exp1.getOperator() == ArithmeticExp.Op.REM)) {
+            return Value.getUndef();
+        }
         if (operand1.isNAC() || operand2.isNAC()) {
             return Value.getNAC();
         }

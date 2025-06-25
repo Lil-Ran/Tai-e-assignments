@@ -42,6 +42,7 @@ class WorkListSolver<Node, Fact> extends Solver<Node, Fact> {
             var node = worklist.stream().findFirst().get();
             worklist.remove(node);
             if (cfg.isEntry(node)) continue;
+            result.setInFact(node, analysis.newInitialFact());
             for (var pred : cfg.getPredsOf(node)) {
                 analysis.meetInto(result.getOutFact(pred), result.getInFact(node));
             }
