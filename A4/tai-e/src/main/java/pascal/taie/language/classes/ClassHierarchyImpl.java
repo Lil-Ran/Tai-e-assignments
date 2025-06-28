@@ -24,8 +24,15 @@ package pascal.taie.language.classes;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import pascal.taie.ir.proginfo.FieldRef;
 import pascal.taie.ir.proginfo.MethodRef;
+import pascal.taie.language.type.ArrayType;
+import pascal.taie.language.type.ClassType;
+import pascal.taie.language.type.Type;
 import pascal.taie.util.AnalysisException;
+import pascal.taie.util.collection.Maps;
+import pascal.taie.util.collection.Sets;
+import pascal.taie.util.collection.TwoKeyMap;
 
 import javax.annotation.Nullable;
 import java.util.Collection;
@@ -64,6 +71,16 @@ public class ClassHierarchyImpl implements ClassHierarchy {
      * Map from each class to its direct subclasses.
      */
     private final Map<JClass, Set<JClass>> directSubclasses = newMap();
+
+    /**
+     * Map from a class to its direct inner classes.
+     */
+    private final Map<JClass, Set<JClass>> directInnerClasses = newMap();
+
+    /**
+     * Cache results of method dispatch.
+     */
+    private final TwoKeyMap<JClass, Subsignature, JMethod> dispatchTable = Maps.newTwoKeyMap();
 
     @Override
     public void setDefaultClassLoader(JClassLoader loader) {
@@ -160,6 +177,11 @@ public class ClassHierarchyImpl implements ClassHierarchy {
         return directSubclasses.getOrDefault(jclass, Set.of());
     }
 
+    @Override
+    public Collection<JClass> getDirectInnerClassesOf(JClass jclass) {
+        return directInnerClasses.getOrDefault(jclass, Set.of());
+    }
+
     private static boolean checkCHA = false;
 
     public static void setCheckCHA(boolean checkCHA) {
@@ -180,6 +202,47 @@ public class ClassHierarchyImpl implements ClassHierarchy {
 
     @Override
     public @Nullable
+    JMethod getMethod(String methodSig) {
+        // TODO: add warning for ambiguous methods (due to classes
+        //  with the same name)
+        String className = StringReps.getClassNameOf(methodSig);
+        JClass jclass = getClass(className);
+        if (jclass != null) {
+            Subsignature subsig = Subsignature.get(
+                    StringReps.getSubsignatureOf(methodSig));
+            return jclass.getDeclaredMethod(subsig);
+        }
+        return null;
+    }
+
+    @Override
+    public @Nullable
+    JField getField(String fieldSig) {
+        // TODO: add warning for ambiguous fields (due to classes
+        //  with the same name)
+        String className = StringReps.getClassNameOf(fieldSig);
+        JClass jclass = getClass(className);
+        if (jclass != null) {
+            String fieldName = StringReps.getFieldNameOf(fieldSig);
+            return jclass.getDeclaredField(fieldName);
+        }
+        return null;
+    }
+
+    @Override
+    public @Nullable
+    JField getJREField(String fieldSig) {
+        String className = StringReps.getClassNameOf(fieldSig);
+        JClass jclass = getJREClass(className);
+        if (jclass != null) {
+            String fieldName = StringReps.getFieldNameOf(fieldSig);
+            return jclass.getDeclaredField(fieldName);
+        }
+        return null;
+    }
+
+    @Override
+    public @Nullable
     JMethod resolveMethod(MethodRef methodRef) {
         checkCHA();
         JClass declaringClass = methodRef.getDeclaringClass();
@@ -191,6 +254,84 @@ public class ClassHierarchyImpl implements ClassHierarchy {
             return declaringClass.getDeclaredMethod(methodRef.getName());
         }
         return null;
+    }
+
+    @Override
+    public @Nullable
+    JField resolveField(FieldRef fieldRef) {
+        return resolveField(fieldRef.getDeclaringClass(),
+                fieldRef.getName(), fieldRef.getType());
+    }
+
+    private JField resolveField(JClass jclass, String name, Type type) {
+        JField field;
+        // 0. First, check and handle phantom fields
+//        if (jclass.isPhantom()) {
+//            field = jclass.getPhantomField(name);
+//            if (field == null) {
+//                field = new JField(jclass, name, Set.of(),
+//                        type, AnnotationHolder.emptyHolder());
+//                jclass.addPhantomField(name, field);
+//            }
+//            return field;
+//        }
+        // JVM Spec. (11 Ed.), 5.4.3.2 Field Resolution
+        // 1. If C declares a field with the name and descriptor specified
+        // by the field reference, field lookup succeeds. The declared field
+        // is the result of the field lookup.
+        field = jclass.getDeclaredField(name);
+        if (field != null && field.getType().equals(type)) {
+            return field;
+        }
+        // 2. Otherwise, field lookup is applied recursively to the
+        // direct superinterfaces of the specified class or interface C.
+        for (JClass iface : jclass.getInterfaces()) {
+            field = resolveField(iface, name, type);
+            if (field != null) {
+                return field;
+            }
+        }
+        // 3. Otherwise, if C has a superclass S, field lookup is applied
+        // recursively to S.
+        if (jclass.getSuperClass() != null) {
+            return resolveField(jclass.getSuperClass(), name, type);
+        }
+        // 5. Otherwise, field lookup fails.
+        return null;
+        // TODO:
+        //  1. check accessibility
+        //  2. handle erroneous cases (e.g., multiple fields with same name)
+    }
+
+    @Override
+    public @Nullable
+    JMethod dispatch(Type receiverType, MethodRef methodRef) {
+        JClass cls;
+        if (receiverType instanceof ClassType) {
+            cls = ((ClassType) receiverType).getJClass();
+        } else if (receiverType instanceof ArrayType) {
+            cls = getJREClass(ClassNames.OBJECT);
+        } else {
+            throw new AnalysisException(receiverType + " cannot be dispatched");
+        }
+        return dispatch(cls, methodRef);
+    }
+
+    @Override
+    public @Nullable
+    JMethod dispatch(JClass receiverClass, MethodRef methodRef) {
+        Subsignature subsignature = methodRef.getSubsignature();
+        JMethod target = dispatchTable.get(receiverClass, subsignature);
+        if (target == null) {
+            target = lookupMethod(receiverClass, subsignature, false);
+            if (target != null) {
+                dispatchTable.put(receiverClass, subsignature, target);
+            } else {
+                logger.debug("Failed to dispatch {} on {}",
+                        subsignature, receiverClass);
+            }
+        }
+        return target;
     }
 
     private JMethod lookupMethod(JClass jclass, Subsignature subsignature,
@@ -227,6 +368,101 @@ public class ClassHierarchyImpl implements ClassHierarchy {
             }
         }
         return null;
+    }
+
+    @Override
+    public boolean isSubclass(JClass superclass, JClass subclass) {
+        if (superclass.equals(subclass)) {
+            return true;
+        } else if (superclass == getObjectClass()) {
+            return true;
+        } else if (subclass.isInterface()) {
+            return superclass.isInterface() &&
+                    isSubinterface(superclass, subclass);
+        } else {
+            return isSubclass0(superclass, subclass);
+        }
+    }
+
+    /**
+     * Obtains JClass representing java.lang.Object.
+     * Since the creation of JClass requires TypeSystem, which may
+     * not be initialized when class loaders are created,
+     * we provide this method to retrieve Object class lazily.
+     *
+     * @return JClass for java.lang.Object
+     */
+    private JClass getObjectClass() {
+        if (JavaLangObject == null) {
+            JClassLoader loader = bootstrapLoader != null ?
+                    bootstrapLoader : defaultLoader;
+            JavaLangObject = loader.loadClass(ClassNames.OBJECT);
+        }
+        return JavaLangObject;
+    }
+
+    /**
+     * Traverses class hierarchy to check if subiface is
+     * a subinterface of superiface.
+     */
+    private boolean isSubinterface(JClass superiface, JClass subiface) {
+        if (subiface.equals(superiface)) {
+            return true;
+        }
+        for (JClass iface : subiface.getInterfaces()) {
+            if (isSubinterface(superiface, iface)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Traverses class hierarchy to check if subclass is a subclass of superclass.
+     * TODO: optimize performance
+     */
+    private boolean isSubclass0(JClass superclass, JClass subclass) {
+        boolean isToInterface = superclass.isInterface();
+        for (JClass jclass = subclass; jclass != null;
+             jclass = jclass.getSuperClass()) {
+            if (jclass.equals(superclass)) {
+                return true;
+            }
+            if (isToInterface) {
+                // Interfaces can only extend other interfaces, thus we only
+                // have to consider the interfaces of the subclass
+                // if superclass is an interface.
+                for (JClass iface : jclass.getInterfaces()) {
+                    if (isSubclass0(superclass, iface)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    @Override
+    public Collection<JClass> getAllSubclassesOf(JClass jclass, boolean selfInclude) {
+        // TODO: cache results?
+        Set<JClass> subclasses = Sets.newHybridSet();
+        getAllSubclassesOf0(jclass, subclasses, selfInclude);
+        return subclasses;
+    }
+
+    private void getAllSubclassesOf0(JClass jclass, Set<JClass> result, boolean selfInclude) {
+        if (selfInclude) {
+            result.add(jclass);
+        }
+        if (jclass.isInterface()) {
+            getDirectSubinterfacesOf(jclass).forEach(subiface ->
+                    getAllSubclassesOf0(subiface, result, true));
+            getDirectImplementorsOf(jclass).forEach(impl ->
+                    getAllSubclassesOf0(impl, result, true));
+        } else {
+            getDirectSubclassesOf(jclass).forEach(subclass ->
+                    getAllSubclassesOf0(subclass, result, true));
+        }
     }
 
     @Override
