@@ -61,7 +61,13 @@ class InterSolver<Method, Node, Fact> {
     private void initialize() {
         // TODO - finish me
         workList = new SetQueue<>();
+        var entry_nodes = icfg.entryMethods().map(icfg::getEntryOf).toList();
         for (var node : icfg) {
+            if (entry_nodes.contains(node)) {
+                result.setInFact(node, analysis.newBoundaryFact(node));
+                result.setOutFact(node, analysis.newBoundaryFact(node));
+                continue;
+            }
             result.setInFact(node, analysis.newInitialFact());
             result.setOutFact(node, analysis.newInitialFact());
         }

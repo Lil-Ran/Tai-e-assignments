@@ -78,13 +78,7 @@ public class InterConstantPropagation extends
     @Override
     protected boolean transferCallNode(Stmt stmt, CPFact in, CPFact out) {
         // TODO - finish me
-        var old_out = out.copy();
-        out.clear();
-        out.copyFrom(in);
-        var def = stmt.getDef().orElse(null);
-        if (def instanceof Var v)
-            out.remove(v);
-        return !out.equals(old_out);
+        return out.copyFrom(in);
     }
 
     @Override
