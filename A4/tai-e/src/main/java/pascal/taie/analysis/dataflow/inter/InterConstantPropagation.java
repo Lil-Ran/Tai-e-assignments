@@ -24,6 +24,7 @@ package pascal.taie.analysis.dataflow.inter;
 
 import pascal.taie.analysis.dataflow.analysis.constprop.CPFact;
 import pascal.taie.analysis.dataflow.analysis.constprop.ConstantPropagation;
+import pascal.taie.analysis.dataflow.analysis.constprop.Value;
 import pascal.taie.analysis.graph.cfg.CFG;
 import pascal.taie.analysis.graph.cfg.CFGBuilder;
 import pascal.taie.analysis.graph.icfg.CallEdge;
@@ -77,36 +78,68 @@ public class InterConstantPropagation extends
     @Override
     protected boolean transferCallNode(Stmt stmt, CPFact in, CPFact out) {
         // TODO - finish me
-        return false;
+        var old_out = out.copy();
+        out.clear();
+        out.copyFrom(in);
+        var def = stmt.getDef().orElse(null);
+        if (def instanceof Var v)
+            out.remove(v);
+        return !out.equals(old_out);
     }
 
     @Override
     protected boolean transferNonCallNode(Stmt stmt, CPFact in, CPFact out) {
         // TODO - finish me
-        return false;
+        return cp.transferNode(stmt, in, out);
     }
 
     @Override
     protected CPFact transferNormalEdge(NormalEdge<Stmt> edge, CPFact out) {
         // TODO - finish me
-        return null;
+        return out.copy();
     }
 
     @Override
     protected CPFact transferCallToReturnEdge(CallToReturnEdge<Stmt> edge, CPFact out) {
         // TODO - finish me
-        return null;
+        var in = out.copy();
+        var stmt = edge.getSource();
+        stmt.getDef().ifPresent(lVal -> {
+            if (lVal instanceof Var v)
+                in.remove(v);
+        });
+        return in;
     }
 
     @Override
     protected CPFact transferCallEdge(CallEdge<Stmt> edge, CPFact callSiteOut) {
         // TODO - finish me
-        return null;
+        var invoke_exp = (InvokeExp) edge.getSource().getUses().stream()
+                .filter(e -> e instanceof InvokeExp).findFirst().orElse(null);
+        if (invoke_exp == null)
+            return new CPFact();
+        var actual = invoke_exp.getArgs().iterator();
+        var formal = edge.getCallee().getIR().getParams().iterator();
+        var in = new CPFact();
+        while (actual.hasNext() && formal.hasNext()) {
+            in.update(formal.next(), callSiteOut.get(actual.next()));
+        }
+        return in;
     }
 
     @Override
     protected CPFact transferReturnEdge(ReturnEdge<Stmt> edge, CPFact returnOut) {
         // TODO - finish me
-        return null;
+        var formal = edge.getCallSite().getDef().orElse(null);
+        if (!(formal instanceof Var))
+            return new CPFact();
+
+        Value ret_value = Value.getUndef();
+        for (var name : edge.getReturnVars()) {
+            ret_value = cp.meetValue(ret_value, returnOut.get(name));
+        }
+        var in = new CPFact();
+        in.update((Var) formal, ret_value);
+        return in;
     }
 }

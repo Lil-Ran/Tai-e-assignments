@@ -60,9 +60,27 @@ class InterSolver<Method, Node, Fact> {
 
     private void initialize() {
         // TODO - finish me
+        workList = new SetQueue<>();
+        for (var node : icfg) {
+            result.setInFact(node, analysis.newInitialFact());
+            result.setOutFact(node, analysis.newInitialFact());
+        }
     }
 
     private void doSolve() {
         // TODO - finish me
+        workList.addAll(icfg.getNodes());
+        while (!workList.isEmpty()) {
+            var node = workList.poll();
+            result.setInFact(node, analysis.newInitialFact());
+            for (var edge : icfg.getInEdgesOf(node)) {
+                var pred_out = result.getOutFact(edge.getSource());
+                var edge_out = analysis.transferEdge(edge, pred_out);
+                analysis.meetInto(edge_out, result.getInFact(node));
+            }
+            if (analysis.transferNode(node, result.getInFact(node), result.getOutFact(node))) {
+                workList.addAll(icfg.getSuccsOf(node));
+            }
+        }
     }
 }
