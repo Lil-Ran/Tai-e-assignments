@@ -96,10 +96,13 @@ class Solver {
      * Processes new reachable method.
      */
     private void addReachable(JMethod method) {
+        // 对 new/赋值/静态调用/静态字段访问 只需要每个方法处理一次
         if (callGraph.contains(method))
             return;
+        // 副产物：构建调用图
         callGraph.addReachableMethod(method);
         for (var stmt : method.getIR().getStmts()) {
+            // 用访问者模式处理关注的每条语句，添加 PFG 边
             stmt.accept(stmtProcessor);
         }
     }
@@ -112,6 +115,7 @@ class Solver {
         public Void visit(New stmt) {
             var varPtr = pointerFlowGraph.getVarPtr(stmt.getLValue());
             var obj = heapModel.getObj(stmt);
+            // new 语句直接将对象加入变量的 points-to set 中
             workList.addEntry(varPtr, new PointsToSet(obj));
             return null;
         }
@@ -120,6 +124,7 @@ class Solver {
         public Void visit(Copy stmt) {
             var l = pointerFlowGraph.getVarPtr(stmt.getLValue());
             var r = pointerFlowGraph.getVarPtr(stmt.getRValue());
+            // 赋值语句在 PFG 中添加边
             addPFGEdge(r, l);
             return null;
         }
@@ -131,6 +136,7 @@ class Solver {
             var method = resolveCallee(null, stmt);
             if (method == null)
                 return null;
+            // 处理静态调用语句（传参、返回值），与实例调用语句共用逻辑
             processAnyCallSite(stmt, method);
             return null;
         }
@@ -142,6 +148,7 @@ class Solver {
             var field = stmt.getFieldRef().resolve();
             var fp = pointerFlowGraph.getStaticField(field);
             var rhs = pointerFlowGraph.getVarPtr(stmt.getRValue());
+            // 静态字段赋值语句在 PFG 中添加边
             addPFGEdge(rhs, fp);
             return null;
         }
@@ -153,6 +160,7 @@ class Solver {
             var field = stmt.getFieldRef().resolve();
             var fp = pointerFlowGraph.getStaticField(field);
             var lhs = pointerFlowGraph.getVarPtr(stmt.getLValue());
+            // 静态字段读取语句在 PFG 中添加边
             addPFGEdge(fp, lhs);
             return null;
         }
@@ -162,8 +170,10 @@ class Solver {
      * Adds an edge "source -> target" to the PFG.
      */
     private void addPFGEdge(Pointer source, Pointer target) {
+        // 如果边已存在则直接返回
         if (pointerFlowGraph.addEdge(source, target)) {
             if (!source.getPointsToSet().isEmpty()) {
+                // 准备将 source 的 points-to set 传播到 target
                 workList.addEntry(target, source.getPointsToSet());
             }
         }
@@ -177,10 +187,12 @@ class Solver {
             var entry = workList.pollEntry();
             var p = entry.pointer();
             var pts = entry.pointsToSet();
+            // 如果有新的目标被加入 p 的 points-to set 中，则将这些目标传播到 p 的 PFG 后继
             var difference = propagate(p, pts);
             if (!(p instanceof VarPtr vp))
                 continue;
             var v = vp.getVar();
+            // 对于新发现的每个目标，一并处理对应变量相关的实例字段访问和实例调用语句，发现新的 PFG 边
             for (var obj : difference) {
                 for (var stmt : v.getStoreFields()) {
                     var field = stmt.getFieldRef().resolve();
@@ -242,32 +254,39 @@ class Solver {
             var method = resolveCallee(recv, invoke);
             if (method == null)
                 continue;
+            // 传递 this 指针
             var pThis = method.getIR().getThis();
             if (pThis != null) {
                 workList.addEntry(pointerFlowGraph.getVarPtr(pThis), new PointsToSet(recv));
             }
+            // 处理实例调用语句（传参、返回值），与静态调用语句共用逻辑
             processAnyCallSite(invoke, method);
         }
     }
 
     private void processAnyCallSite(Invoke invoke, JMethod method) {
-        if (callGraph.addEdge(new Edge<>(CallGraphs.getCallKind(invoke), invoke, method))) {
-            addReachable(method);
-            var actual = invoke.getInvokeExp().getArgs().iterator();
-            var formal = method.getIR().getParams().iterator();
-            while (actual.hasNext() && formal.hasNext()) {
+        // 对应对象的某些方法调用已经被处理过了，则不再处理
+        if (!callGraph.addEdge(new Edge<>(CallGraphs.getCallKind(invoke), invoke, method)))
+            return;
+        // 发现新的可达方法
+        addReachable(method);
+        // 传递参数
+        var actual = invoke.getInvokeExp().getArgs().iterator();
+        var formal = method.getIR().getParams().iterator();
+        while (actual.hasNext() && formal.hasNext()) {
+            addPFGEdge(
+                    pointerFlowGraph.getVarPtr(actual.next()),
+                    pointerFlowGraph.getVarPtr(formal.next())
+            );
+        }
+        // 如果 caller 没有丢弃返回值，则传递返回值
+        if (invoke.getResult() != null) {
+            // 可能有多个 return 语句，传递所有对应变量
+            for (var ret : method.getIR().getReturnVars()) {
                 addPFGEdge(
-                        pointerFlowGraph.getVarPtr(actual.next()),
-                        pointerFlowGraph.getVarPtr(formal.next())
+                        pointerFlowGraph.getVarPtr(ret),
+                        pointerFlowGraph.getVarPtr(invoke.getResult())
                 );
-            }
-            if (invoke.getResult() != null) {
-                for (var ret : method.getIR().getReturnVars()) {
-                    addPFGEdge(
-                            pointerFlowGraph.getVarPtr(ret),
-                            pointerFlowGraph.getVarPtr(invoke.getResult())
-                    );
-                }
             }
         }
     }
