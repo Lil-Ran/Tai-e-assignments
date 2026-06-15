@@ -111,7 +111,16 @@ class Solver {
      * Processes new reachable context-sensitive method.
      */
     private void addReachable(CSMethod csMethod) {
-        // TODO - finish me
+        // 对 new/赋值/静态调用/静态字段访问 只需要每个方法处理一次
+        // 副产物：构建调用图
+        if (!callGraph.addReachableMethod(csMethod))
+            return;
+        // 将上下文打包进 StmtProcessor
+        var stmtProcessor = new StmtProcessor(csMethod);
+        for (var stmt : csMethod.getMethod().getIR().getStmts()) {
+            // 用访问者模式处理关注的每条语句，添加 PFG 边
+            stmt.accept(stmtProcessor);
+        }
     }
 
     /**
@@ -128,22 +137,121 @@ class Solver {
             this.context = csMethod.getContext();
         }
 
-        // TODO - if you choose to implement addReachable()
-        //  via visitor pattern, then finish me
+        @Override
+        public Void visit(New stmt) {
+            var varPtr = csManager.getCSVar(context, stmt.getLValue());
+            // 堆敏感：仅与 new 语句相关
+            var heapObj = heapModel.getObj(stmt);
+            var heapContext = contextSelector.selectHeapContext(csMethod, heapObj);
+            var csObj = csManager.getCSObj(heapContext, heapObj);
+            // new 语句直接将对象加入变量的 points-to set 中
+            workList.addEntry(varPtr, PointsToSetFactory.make(csObj));
+            return null;
+        }
+
+        @Override
+        public Void visit(Copy stmt) {
+            var l = csManager.getCSVar(context, stmt.getLValue());
+            var r = csManager.getCSVar(context, stmt.getRValue());
+            // 赋值语句在 PFG 中添加边
+            addPFGEdge(r, l);
+            return null;
+        }
+
+        @Override
+        public Void visit(Invoke stmt) {
+            if (!stmt.isStatic())
+                return null;
+            var method = resolveCallee(null, stmt);
+            if (method == null)
+                return null;
+            var csCallSite = csManager.getCSCallSite(context, stmt);
+            var calleeContext = contextSelector.selectContext(csCallSite, method);
+            var csCallee = csManager.getCSMethod(calleeContext, method);
+            // 处理静态调用语句（传参、返回值），与实例调用语句共用逻辑
+            processAnyCallSite(csCallSite, csCallee);
+            return null;
+        }
+
+        @Override
+        public Void visit(StoreField stmt) {
+            if (!stmt.isStatic())
+                return null;
+            var field = stmt.getFieldRef().resolve();
+            var fp = csManager.getStaticField(field);
+            var rhs = csManager.getCSVar(context, stmt.getRValue());
+            // 静态字段赋值语句在 PFG 中添加边
+            addPFGEdge(rhs, fp);
+            return null;
+        }
+
+        @Override
+        public Void visit(LoadField stmt) {
+            if (!stmt.isStatic())
+                return null;
+            var field = stmt.getFieldRef().resolve();
+            var fp = csManager.getStaticField(field);
+            var lhs = csManager.getCSVar(context, stmt.getLValue());
+            // 静态字段读取语句在 PFG 中添加边
+            addPFGEdge(fp, lhs);
+            return null;
+        }
     }
 
     /**
      * Adds an edge "source -> target" to the PFG.
      */
     private void addPFGEdge(Pointer source, Pointer target) {
-        // TODO - finish me
+        // 如果边已存在则直接返回
+        if (pointerFlowGraph.addEdge(source, target)) {
+            if (!source.getPointsToSet().isEmpty()) {
+                // 准备将 source 的 points-to set 传播到 target
+                workList.addEntry(target, source.getPointsToSet());
+            }
+        }
     }
 
     /**
      * Processes work-list entries until the work-list is empty.
      */
     private void analyze() {
-        // TODO - finish me
+        while (!workList.isEmpty()) {
+            var entry = workList.pollEntry();
+            var p = entry.pointer();
+            var pts = entry.pointsToSet();
+            // 如果有新的目标被加入 p 的 points-to set 中，则将这些目标传播到 p 的 PFG 后继
+            var difference = propagate(p, pts);
+            if (!(p instanceof CSVar vp))
+                continue;
+            var varPtr = vp.getVar();
+            var varContext = vp.getContext();
+            // 对于新发现的每个目标，一并处理对应变量相关的实例字段访问和实例调用语句，发现新的 PFG 边
+            for (var obj : difference) {
+                for (var stmt : varPtr.getStoreFields()) {
+                    var field = stmt.getFieldRef().resolve();
+                    var fp = csManager.getInstanceField(obj, field);
+                    var rhs = csManager.getCSVar(varContext, stmt.getRValue());
+                    addPFGEdge(rhs, fp);
+                }
+                for (var stmt : varPtr.getLoadFields()) {
+                    var field = stmt.getFieldRef().resolve();
+                    var fp = csManager.getInstanceField(obj, field);
+                    var lhs = csManager.getCSVar(varContext, stmt.getLValue());
+                    addPFGEdge(fp, lhs);
+                }
+                for (var stmt : varPtr.getStoreArrays()) {
+                    var arr = csManager.getArrayIndex(obj);
+                    var rhs = csManager.getCSVar(varContext, stmt.getRValue());
+                    addPFGEdge(rhs, arr);
+                }
+                for (var stmt : varPtr.getLoadArrays()) {
+                    var arr = csManager.getArrayIndex(obj);
+                    var lhs = csManager.getCSVar(varContext, stmt.getLValue());
+                    addPFGEdge(arr, lhs);
+                }
+                processCall(vp, obj);
+            }
+        }
     }
 
     /**
@@ -151,8 +259,21 @@ class Solver {
      * returns the difference set of pointsToSet and pt(pointer).
      */
     private PointsToSet propagate(Pointer pointer, PointsToSet pointsToSet) {
-        // TODO - finish me
-        return null;
+        var difference = PointsToSetFactory.make();
+        // difference = pointsToSet - pointer.getPointsToSet()
+        pointsToSet.objects()
+                .filter(element -> !pointer.getPointsToSet().contains(element))
+                .forEach(difference::addObject);
+        if (!difference.isEmpty()) {
+            // pointer.getPointsToSet() += difference
+            for (var element : difference) {
+                pointer.getPointsToSet().addObject(element);
+            }
+            for (var succ : pointerFlowGraph.getSuccsOf(pointer)) {
+                workList.addEntry(succ, difference);
+            }
+        }
+        return difference;
     }
 
     /**
@@ -162,7 +283,55 @@ class Solver {
      * @param recvObj set of new discovered objects pointed by the variable.
      */
     private void processCall(CSVar recv, CSObj recvObj) {
-        // TODO - finish me
+        // caller 的上下文是变量 recv 所属方法的上下文
+        var callerContext = recv.getContext();
+        for (var invoke : recv.getVar().getInvokes()) {
+            var csCallSite = csManager.getCSCallSite(callerContext, invoke);
+            var method = resolveCallee(recvObj, invoke);
+            if (method == null)
+                continue;
+            // callee 的上下文由 callsite（caller 上下文）、接收对象和被调用方法共同决定
+            var calleeContext = contextSelector.selectContext(csCallSite, recvObj, method);
+            // 传递 this 指针
+            var pThis = method.getIR().getThis();
+            if (pThis != null) {
+                workList.addEntry(csManager.getCSVar(calleeContext, pThis), PointsToSetFactory.make(recvObj));
+            }
+            var csMethod = csManager.getCSMethod(calleeContext, method);
+            // 处理实例调用语句（传参、返回值），与静态调用语句共用逻辑
+            processAnyCallSite(csCallSite, csMethod);
+        }
+    }
+
+    private void processAnyCallSite(CSCallSite csCallSite, CSMethod csMethod) {
+        var callerContext = csCallSite.getContext();
+        var invoke = csCallSite.getCallSite();
+        var calleeContext = csMethod.getContext();
+        var method = csMethod.getMethod();
+        // 对应对象的某些方法调用已经被处理过了，则不再处理
+        if (!callGraph.addEdge(new Edge<>(CallGraphs.getCallKind(invoke), csCallSite, csMethod)))
+            return;
+        // 发现新的可达方法
+        addReachable(csMethod);
+        // 传递参数
+        var actual = invoke.getInvokeExp().getArgs().iterator();
+        var formal = method.getIR().getParams().iterator();
+        while (actual.hasNext() && formal.hasNext()) {
+            addPFGEdge(
+                    csManager.getCSVar(callerContext, actual.next()),
+                    csManager.getCSVar(calleeContext, formal.next())
+            );
+        }
+        // 如果 caller 没有丢弃返回值，则传递返回值
+        if (invoke.getResult() != null) {
+            // 可能有多个 return 语句，传递所有对应变量
+            for (var ret : method.getIR().getReturnVars()) {
+                addPFGEdge(
+                        csManager.getCSVar(calleeContext, ret),
+                        csManager.getCSVar(callerContext, invoke.getResult())
+                );
+            }
+        }
     }
 
     /**
