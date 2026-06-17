@@ -60,26 +60,11 @@ public class InterConstantPropagation extends
         cp = new ConstantPropagation(new AnalysisConfig(ConstantPropagation.ID));
     }
 
-    // abstract class _LValue {
-    // }
+    record _InstanceField(Var base, JField field) {
+    }
 
-    // class _Var extends _LValue {
-    //     public Var var;
-    // }
-
-    // class _InstanceField extends _LValue {
-    //     public Var base;
-    //     public JField field;
-    // }
-
-    // class _StaticField extends _LValue {
-    //     public JField field;
-    // }
-
-    // class _ArrayIndex extends _LValue {
-    //     public Var base;
-    //     public Value index;
-    // }
+    record _ArrayIndex(Var base, Value index) {
+    }
 
     /**
      * 表示一个可能具有别名的值对象。
@@ -105,9 +90,9 @@ public class InterConstantPropagation extends
 
     private final Map<JField, ReferenceValue> staticFieldValues = new HashMap<>();
 
-    private final Map<Var, Map<JField, ReferenceValue>> instanceFieldValues = new HashMap<>();
+    private final Map<_InstanceField, ReferenceValue> instanceFieldValues = new HashMap<>();
 
-    private final Map<Var, Map<Value, ReferenceValue>> indexValues = new HashMap<>();
+    private final Map<_ArrayIndex, ReferenceValue> indexValues = new HashMap<>();
 
     private Map<Var, Set<Var>> findAliases(PointerAnalysisResult pta) {
         var result = new HashMap<Var, Set<Var>>();
@@ -183,20 +168,18 @@ public class InterConstantPropagation extends
                 ref = staticFieldValues.get(field);
             } else if (fieldAccess instanceof InstanceFieldAccess ifa) {
                 Var v = ifa.getBase();
-                if (!instanceFieldValues.containsKey(v)) {
-                    Map<JField, ReferenceValue> map = new HashMap<>();
-                    instanceFieldValues.put(v, map);
-                    if (aliases.containsKey(v)) {
-                        // FIXME: 别名关系不是传递的，所以不能将所有别名都赋值为表示同一个对象的同一个 map
-                        // 例如 a 和 b 互为别名且已经赋了同一个 map，下次处理与 b 互为别名的 c 时会覆盖掉 b 的 map
-                        aliases.get(v).forEach(alias -> instanceFieldValues.put(alias, map));
+                var key = new _InstanceField(v, field);
+                if (!instanceFieldValues.containsKey(key) && aliases.containsKey(v)) {
+                    for (var alias : aliases.get(v)) {
+                        var aliasKey = new _InstanceField(alias, field);
+                        if (instanceFieldValues.containsKey(aliasKey)) {
+                            instanceFieldValues.put(key, instanceFieldValues.get(aliasKey));
+                            break;
+                        }
                     }
                 }
-                var fields = instanceFieldValues.get(v);
-                if (!fields.containsKey(field)) {
-                    fields.put(field, new ReferenceValue());
-                }
-                ref = fields.get(field);
+                instanceFieldValues.putIfAbsent(key, new ReferenceValue());
+                ref = instanceFieldValues.get(key);
             }
 
             if (ref != null) {
