@@ -44,6 +44,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BiConsumer;
 
 /**
  * Implementation of interprocedural constant propagation for int values.
@@ -61,9 +62,6 @@ public class InterConstantPropagation extends
     }
 
     record _InstanceField(Var base, JField field) {
-    }
-
-    record _ArrayIndex(Var base, Value index) {
     }
 
     /**
@@ -92,7 +90,7 @@ public class InterConstantPropagation extends
 
     private final Map<_InstanceField, ReferenceValue> instanceFieldValues = new HashMap<>();
 
-    private final Map<_ArrayIndex, ReferenceValue> indexValues = new HashMap<>();
+    private final Map<Var, Map<Value, ReferenceValue>> indexValues = new HashMap<>();
 
     private Map<Var, Set<Var>> findAliases(PointerAnalysisResult pta) {
         var result = new HashMap<Var, Set<Var>>();
@@ -112,6 +110,27 @@ public class InterConstantPropagation extends
             }
         }
         return result;
+    }
+
+    private boolean isIndexAlias(Value index, Value candidateIndex) {
+        if (index.isUndef() || candidateIndex.isUndef())
+            return false;
+        if (index.isNAC() || candidateIndex.isNAC())
+            return true;
+        return index.getConstant() == candidateIndex.getConstant();
+    }
+
+    private void arrayForEachVarAlias(Var v, Value index, BiConsumer<Value, ReferenceValue> action) {
+        indexValues.putIfAbsent(v, new HashMap<>());
+        indexValues.get(v).putIfAbsent(index, new ReferenceValue());
+        indexValues.get(v).forEach(action);
+        if (aliases.containsKey(v)) {
+            for (var alias : aliases.get(v)) {
+                if (indexValues.containsKey(alias)) {
+                    indexValues.get(alias).forEach(action);
+                }
+            }
+        }
     }
 
     @Override
@@ -162,9 +181,7 @@ public class InterConstantPropagation extends
 
             ReferenceValue ref = null;
             if (fieldAccess instanceof StaticFieldAccess) {
-                if (!staticFieldValues.containsKey(field)) {
-                    staticFieldValues.put(field, new ReferenceValue());
-                }
+                staticFieldValues.putIfAbsent(field, new ReferenceValue());
                 ref = staticFieldValues.get(field);
             } else if (fieldAccess instanceof InstanceFieldAccess ifa) {
                 Var v = ifa.getBase();
@@ -184,22 +201,49 @@ public class InterConstantPropagation extends
 
             if (ref != null) {
                 if (fieldStmt instanceof StoreField storeStmt) {
-                    Value rhs = ConstantPropagation.evaluate(storeStmt.getRValue(), in);
+                    Value rhs = in.get(storeStmt.getRValue());
                     if (ref.meetValue(rhs)) {
                         solver.workListAddAll(ref.loadStmts);
                     }
                 } else if (fieldStmt instanceof LoadField loadStmt) {
                     ref.loadStmts.add(loadStmt);
-                    var lvar = loadStmt.getLValue();
+                    Var lvar = loadStmt.getLValue();
                     if (ConstantPropagation.canHoldInt(lvar)) {
                         out.update(lvar, ref.value);
                     }
                 }
             }
-        } else if (stmt instanceof StoreArray sa) {
-            // TODO
-        } else if (stmt instanceof LoadArray la) {
-            // TODO
+        } else if (stmt instanceof StoreArray storeArrayStmt) {
+            Value rhs = in.get(storeArrayStmt.getRValue());
+            ArrayAccess access = storeArrayStmt.getArrayAccess();
+            Var v = access.getBase();
+            Value index = in.get(access.getIndex());
+            arrayForEachVarAlias(v, index, (candidateIndex, ref) -> {
+                // 只在 index 与 candidateIndex 完全相等时，才 ref.meetValue(rhs)
+                // 例：a[NAC]=6; a[4]=7; x=a[3]; y=a[NAC];
+                // 不要将 7 传播到 a[NAC] 上，使得 x 发生变化，因为 3 和 4 不是别名关系
+                // 但 a[4]=7; 仍然导致 y=a[NAC]; 重新计算
+                if ((index.equals(candidateIndex)
+                        && ref.meetValue(rhs)  // side effect
+                ) || isIndexAlias(index, candidateIndex)) {
+                    solver.workListAddAll(ref.loadStmts);
+                }
+            });
+        } else if (stmt instanceof LoadArray loadArrayStmt) {
+            Var lvar = loadArrayStmt.getLValue();
+            ArrayAccess access = loadArrayStmt.getArrayAccess();
+            Var v = access.getBase();
+            Value index = in.get(access.getIndex());
+            final Value[] toUpdate = {Value.getUndef()};
+            arrayForEachVarAlias(v, index, (candidateIndex, ref) -> {
+                if (isIndexAlias(index, candidateIndex)) {
+                    ref.loadStmts.add(loadArrayStmt);
+                    toUpdate[0] = cp.meetValue(toUpdate[0], ref.value);
+                }
+            });
+            if (ConstantPropagation.canHoldInt(lvar)) {
+                out.update(lvar, toUpdate[0]);
+            }
         } else if (stmt instanceof DefinitionStmt<?, ?> def
                 && def.getLValue() instanceof Var lvar
                 && ConstantPropagation.canHoldInt(lvar)) {
