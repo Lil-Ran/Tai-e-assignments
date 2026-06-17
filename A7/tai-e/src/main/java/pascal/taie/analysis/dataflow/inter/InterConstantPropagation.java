@@ -119,26 +119,14 @@ public class InterConstantPropagation extends
                 var pts2 = pta.getPointsToSet(v2);
                 if (pts1.stream().anyMatch(pts2::contains)) {
                     // 确定了 v1 和 v2 是别名
-                    addAliases(result, v1, v2);
+                    result.putIfAbsent(v1, new HashSet<>());
+                    result.putIfAbsent(v2, new HashSet<>());
+                    result.get(v1).add(v2);
+                    result.get(v2).add(v1);
                 }
             }
         }
         return result;
-    }
-
-    private void addAliases(Map<Var, Set<Var>> map, Var v1, Var v2) {
-        if (v1.equals(v2)) return;
-        map.putIfAbsent(v1, new HashSet<>());
-        map.putIfAbsent(v2, new HashSet<>());
-        var aliasesOfV1 = map.get(v1).stream().toList();
-        var aliasesOfV2 = map.get(v2).stream().toList();
-        if (!map.get(v1).add(v2)) return;
-        if (!map.get(v2).add(v1)) return;
-        // v1 的所有别名也和 v2 是别名
-        // FIXME: 别名关系不是传递的
-        aliasesOfV1.forEach(v -> addAliases(map, v, v2));
-        // v2 的所有别名也和 v1 是别名
-        aliasesOfV2.forEach(v -> addAliases(map, v, v1));
     }
 
     @Override
@@ -199,6 +187,8 @@ public class InterConstantPropagation extends
                     Map<JField, ReferenceValue> map = new HashMap<>();
                     instanceFieldValues.put(v, map);
                     if (aliases.containsKey(v)) {
+                        // FIXME: 别名关系不是传递的，所以不能将所有别名都赋值为表示同一个对象的同一个 map
+                        // 例如 a 和 b 互为别名且已经赋了同一个 map，下次处理与 b 互为别名的 c 时会覆盖掉 b 的 map
                         aliases.get(v).forEach(alias -> instanceFieldValues.put(alias, map));
                     }
                 }
