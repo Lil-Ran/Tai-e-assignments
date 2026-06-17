@@ -26,6 +26,7 @@ import pascal.taie.analysis.dataflow.fact.DataflowResult;
 import pascal.taie.analysis.graph.icfg.ICFG;
 import pascal.taie.util.collection.SetQueue;
 
+import java.util.Collection;
 import java.util.Queue;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -88,5 +89,9 @@ class InterSolver<Method, Node, Fact> {
                 workList.addAll(icfg.getSuccsOf(node));
             }
         }
+    }
+
+    public void workListAddAll(Collection<Node> nodes) {
+        workList.addAll(nodes);
     }
 }

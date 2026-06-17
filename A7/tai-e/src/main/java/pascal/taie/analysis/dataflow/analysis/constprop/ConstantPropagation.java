@@ -88,15 +88,7 @@ public class ConstantPropagation extends
 
     @Override
     public boolean transferNode(Stmt stmt, CPFact in, CPFact out) {
-        var old_out = out.copy();
-        out.clear();
-        out.copyFrom(in);
-        if (stmt instanceof DefinitionStmt<?, ?> def_stmt
-                && def_stmt.getLValue() instanceof Var lvar
-                && canHoldInt(lvar)) {
-            out.update(lvar, evaluate(def_stmt.getRValue(), in));
-        }
-        return !out.equals(old_out);
+        throw new AnalysisException("ConstantPropagation.transferNode is not used.");
     }
 
     /**
